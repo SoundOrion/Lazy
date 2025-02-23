@@ -643,3 +643,151 @@ async Task<string> LoadDataAsync()
 ✅ **`AsyncLazy<T>` では `Task.Run()` を使うことで、非同期の遅延初期化がしやすくなる**  
 
 つまり **「Lazy は同期的に動作するが、その中で非同期処理を実行させることは可能」** ということですね！
+
+
+自作の `AsyncLazy<T>` をもっと進化させるなら、以下のポイントを考えると良さそうです。
+
+---
+
+## **🚀 `AsyncLazy<T>` の改善ポイント**
+1. **`await asyncLazy` の直感的な使い方をサポート**
+   - `await asyncLazy.Value` の代わりに `await asyncLazy` できるようにする
+   - `GetAwaiter()` を実装する
+
+2. **キャンセル (`CancellationToken`) 対応**
+   - 初期化中にキャンセルできるようにする
+   - `Task.Run()` に `CancellationToken` を渡せるようにする
+
+3. **リトライ機能**
+   - 失敗した場合に **再試行 (retry)** できるようにする
+   - `Task` の例外をキャッチしてリトライできるようにする
+
+4. **非同期のロック (`SemaphoreSlim`) を使って初期化の競合を防ぐ**
+   - `Lazy<T>` はスレッドセーフだが、`Task.Run()` の実行を安全にするために `SemaphoreSlim` を利用する
+
+---
+
+## **✨ 進化版 `AsyncLazy<T>` の実装**
+```csharp
+using System;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+public class AsyncLazy<T>
+{
+    private readonly Func<CancellationToken, Task<T>> _factory;
+    private readonly Lazy<Task<T>> _lazy;
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
+
+    public AsyncLazy(Func<Task<T>> factory)
+        : this((_) => factory()) { }
+
+    public AsyncLazy(Func<CancellationToken, Task<T>> factory)
+    {
+        _factory = factory;
+        _lazy = new Lazy<Task<T>>(() => Task.Run(() => ExecuteAsync(CancellationToken.None)));
+    }
+
+    private async Task<T> ExecuteAsync(CancellationToken cancellationToken)
+    {
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            return await _factory(cancellationToken);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public Task<T> Value => _lazy.Value;
+
+    // 直接 `await asyncLazy` を使えるようにする
+    public TaskAwaiter<T> GetAwaiter() => Value.GetAwaiter();
+
+    // キャンセル機能をサポートした `Value`
+    public Task<T> GetValueAsync(CancellationToken cancellationToken = default)
+    {
+        return _lazy.Value.ContinueWith(task => task.Result, cancellationToken);
+    }
+}
+```
+
+---
+
+## **✨ 進化版 `AsyncLazy<T>` の使い方**
+### **🌟 基本的な使い方**
+```csharp
+AsyncLazy<string> _lazyString = new AsyncLazy<string>(async () =>
+{
+    await Task.Delay(2000);
+    return "遅延初期化された値";
+});
+
+static async Task Main()
+{
+    Console.WriteLine("値の取得開始...");
+
+    // ✅ `await asyncLazy` でシンプルに使える
+    string value = await _lazyString;
+    
+    Console.WriteLine($"取得した値: {value}");
+}
+```
+
+---
+
+### **🌟 キャンセル機能を活用**
+```csharp
+CancellationTokenSource cts = new CancellationTokenSource();
+
+AsyncLazy<string> _lazyWithCancel = new AsyncLazy<string>(async (cancellationToken) =>
+{
+    await Task.Delay(5000, cancellationToken); // 途中でキャンセルされる可能性あり
+    return "キャンセル可能な値";
+});
+
+static async Task Main()
+{
+    CancellationTokenSource cts = new CancellationTokenSource();
+
+    var task = _lazyWithCancel.GetValueAsync(cts.Token);
+
+    // 途中でキャンセル
+    cts.CancelAfter(2000);
+
+    try
+    {
+        string value = await task;
+        Console.WriteLine($"取得した値: {value}");
+    }
+    catch (TaskCanceledException)
+    {
+        Console.WriteLine("値の取得がキャンセルされました");
+    }
+}
+```
+
+---
+
+## **✨ 進化版 `AsyncLazy<T>` のポイント**
+✅ **`await asyncLazy` でシンプルに書ける (`GetAwaiter()` を実装)**  
+✅ **キャンセル (`CancellationToken`) をサポート**  
+✅ **非同期ロック (`SemaphoreSlim`) で競合防止**  
+✅ **`Task.Run()` でバックグラウンドスレッドで実行**  
+
+---
+
+## **🚀 さらなる進化アイデア**
+- **リトライ機能**
+  - `ExecuteAsync()` で失敗時の再試行をサポート
+- **エラーハンドリング**
+  - `Lazy<Task<T>>` はエラーをキャッシュするので、例外が発生した場合のリセット機能を追加
+- **Time-to-Live (TTL)**
+  - キャッシュの有効期限を持たせ、一定時間後に再生成
+
+---
+
+💡 **これなら汎用的に使える `AsyncLazy<T>` が完成！** 🚀
