@@ -791,3 +791,109 @@ static async Task Main()
 ---
 
 💡 **これなら汎用的に使える `AsyncLazy<T>` が完成！** 🚀
+
+とても良い視点です！ **「`Task.Run()` を使うのは、CPUバウンドな処理（画像処理や重い計算）なのに、非同期初期化に使うのはオーバーヘッドでは？」** という疑問ですね。  
+
+### **📌 `Task.Run()` を使うことで生じるオーバーヘッド**
+- `Task.Run()` を使うと **新しいタスクをスレッドプールで実行** するため、スレッド切り替え（コンテキストスイッチ）のオーバーヘッドが発生する。
+- **I/O バウンド（DB接続・ファイル読み込み・HTTPリクエスト）などの処理には `Task.Run()` は不要** で、直接 `await` するのがベストプラクティス。
+- 初期化処理が**軽量であれば、単純に `Task<T>` を返すだけの方が高速**。
+
+---
+
+## **🚀 `Task.Run()` を使わない `AsyncLazy<T>` の実装**
+`Task.Run()` を使わずに、**初期化処理のオーバーヘッドを最小限にするバージョン** を考えてみましょう。
+
+```csharp
+using System;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+public class AsyncLazy<T>
+{
+    private readonly Func<CancellationToken, Task<T>> _factory;
+    private readonly Lazy<Task<T>> _lazy;
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
+
+    public AsyncLazy(Func<Task<T>> factory)
+        : this((_) => factory()) { }
+
+    public AsyncLazy(Func<CancellationToken, Task<T>> factory)
+    {
+        _factory = factory;
+        _lazy = new Lazy<Task<T>>(() => ExecuteAsync(CancellationToken.None));
+    }
+
+    private async Task<T> ExecuteAsync(CancellationToken cancellationToken)
+    {
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            return await _factory(cancellationToken); // `Task.Run()` を使わない
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public Task<T> Value => _lazy.Value;
+
+    public TaskAwaiter<T> GetAwaiter() => Value.GetAwaiter();
+
+    public Task<T> GetValueAsync(CancellationToken cancellationToken = default)
+    {
+        return _lazy.Value.ContinueWith(task => task.Result, cancellationToken);
+    }
+}
+```
+
+---
+
+## **✨ `Task.Run()` なしの `AsyncLazy<T>` のメリット**
+### ✅ **I/O バウンドな初期化に最適**
+- `Task.Run()` を使わないことで、**I/O バウンド（DB接続、ネットワークアクセス、ファイルIO）に最適化** できる。
+- 例えば、次のような非同期処理ではスレッドプールの不要なオーバーヘッドを避けられる。
+
+```csharp
+AsyncLazy<string> _lazyString = new AsyncLazy<string>(async () =>
+{
+    await Task.Delay(2000); // ネットワークやDBアクセスを模擬
+    return "遅延初期化された値";
+});
+```
+👉 これなら **`Task.Run()` なしで、純粋な非同期処理 (`await Task.Delay`) ができる**。
+
+### ✅ **CPUバウンドなら `Task.Run()` を明示的に使う**
+- CPUバウンド（画像処理や計算処理など）の場合だけ、**利用側で `Task.Run()` を明示的に指定できる**。
+- `AsyncLazy<T>` 自体が `Task.Run()` を強制しないため、使う側が `Task.Run()` を決められる。
+
+```csharp
+AsyncLazy<int> _lazyComputation = new AsyncLazy<int>(() =>
+    Task.Run(() => ExpensiveComputation()));
+
+static int ExpensiveComputation()
+{
+    Thread.Sleep(3000); // 高負荷計算のシミュレーション
+    return 42;
+}
+```
+👉 これなら **「CPUバウンドな処理だけ `Task.Run()` を使い、I/O バウンドな処理はそのまま非同期」** という理想的な動作になる。
+
+---
+
+## **🚀 `Task.Run()` を使う or 使わない どっちがいいのか？**
+| 処理の種類 | `Task.Run()` あり | `Task.Run()` なし |
+|-----------|----------------|----------------|
+| **CPUバウンド（画像処理・計算処理）** | ✅ `Task.Run()` を使うべき | ❌ 使わないとメインスレッドで実行される |
+| **I/O バウンド（DB・HTTP・ファイルIO）** | ❌ `Task.Run()` は不要 | ✅ `Task.Run()` なしで最適 |
+
+---
+
+## **📢 結論**
+✅ **「I/O バウンド（DB・ネットワーク・ファイルIO）なら `Task.Run()` は不要！」**  
+✅ **「CPU バウンド（計算処理・画像処理）なら `Task.Run()` を使うのが最適！」**  
+✅ **「だから `AsyncLazy<T>` には `Task.Run()` を入れず、必要なときに使うべき！」**  
+
+💡 **これで、オーバーヘッドを最小限にしつつ、最適な `AsyncLazy<T>` が完成！** 🚀
